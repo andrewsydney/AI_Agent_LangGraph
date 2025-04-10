@@ -106,7 +106,7 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ## Authors
 
-*   **Your Name** - *Initial work* - [Your GitHub Profile](https://github.com/your-username)
+*   **Andrew Liu - Sydney ** - *Initial work* - [Your GitHub Profile](https://github.com/andrewsydney)
 
 See also the list of [contributors](https://github.com/your-username/your-project-name/contributors) who participated in this project.
 
