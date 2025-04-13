@@ -10,6 +10,18 @@ from pydantic import BaseModel, Field
 from langchain_ollama import ChatOllama # Re-add Ollama import
 from langchain_core.prompts import ChatPromptTemplate # Import prompt template
 from langchain.chains import LLMChain # Correct import for LLMChain if needed, but we use LCEL
+# --- Import the RAG/SQL application ---
+try:
+    from graph_logic.graph_flow import app as rag_sql_app
+    from graph_logic.graph_define import MAX_RETRIES # Import MAX_RETRIES for checking failure
+    RAG_APP_AVAILABLE = True
+    print("Successfully imported RAG/SQL app (rag_sql_app).")
+except ImportError as e:
+    print(f"Warning: Could not import RAG/SQL app from graph_logic.graph_flow: {e}. Retrieval will be simulated.")
+    rag_sql_app = None
+    MAX_RETRIES = 1 # Define a default if import fails
+    RAG_APP_AVAILABLE = False
+# --- End RAG/SQL import ---
 
 # Load environment variables from .env file
 load_dotenv()
@@ -33,8 +45,10 @@ class GraphState(TypedDict):
         messages: The list of messages exchanged so far (using BaseMessage).
         next_node: The next node to route to ('answer', 'retrieve', 'human').
         result: The final result from a node.
+        chat_history: The history of the conversation prior to the current message.
     """
     messages: Annotated[List[BaseMessage], lambda x, y: x + y] # Use BaseMessage and restore Annotated
+    chat_history: List[BaseMessage] | None # Add chat_history field
     next_node: str | None
     result: str | None
 
@@ -55,17 +69,35 @@ def get_router_chain():
         [
             (
                 "system",
-                """You are an expert router.
-                Based on the user's question below, decide whether the question can be answered directly by an AI assistant, requires retrieving information from a database, or needs human intervention.
-                Respond only with the JSON structure specified.
-                for general questions, greetings, the questins you think you can answer without any additional information, respond with 'answer'
-                for questions, creative tasks like writing stories/poems/jokes, respond with 'answer'
-                for questions about specific information, such as standards, policies, procedures respond with 'retrieve'
-                for other questions, respond with 'human'
+                """You are an expert router. Your task is to classify the user's question and decide the next step based on the following rules.
+Respond ONLY with the specified JSON structure: {{"datasource": "decision"}} where 'decision' must be one of 'answer', 'retrieve', or 'human'.
 
-                """,
+Routing Rules:
+
+1.  **Route to 'answer' if:**
+    *   The question is general (e.g., greetings).
+    *   You believe you can answer directly without needing specific external information.
+    *   The question involves creative tasks (e.g., writing stories, poems, jokes).
+
+2.  **Route to 'retrieve' if:**
+    *   The question asks for specific internal information, such as standards, policies, or procedures.
+    *   The question involves specific identifiers like:
+        *   Phone numbers (DIDs, extensions, service providers, telco names).
+        *   Store names, statuses, retail store identifiers (e.g., R001, r002, store IDs).
+        *   Internal phone extensions/numbers (e.g., 7-digit 8001XXX, 601, 621) or rules about them (mandatory, optional, sharing).
+    *   The user mentions RXXX store numbers or asks about store-specific details.
+
+3.  **Route to 'human' if:**
+    *   The question does not fall into the 'answer' or 'retrieve' categories.
+
+Example User Question Input:
+User Question:
+{{user_question}}
+
+Your JSON Response:
+"""
             ),
-            ("human", "User Question:\n{user_question}"),
+            ("human", "User Question:\\n{user_question}"),
         ]
     )
 
@@ -209,28 +241,103 @@ def answer_node(state: GraphState):
     print(f"Answer Response: {result}")
     return {"result": result}
 
-# --- Retrieve Node (Simulation - needs update for BaseMessage) ---
+# --- Retrieve Node (Updated to call RAG/SQL app) ---
 def retrieve_node(state: GraphState):
     """
-    Simulates retrieving information from a source.
+    Processes the user query using the RAG/SQL application, passing chat history.
 
     Args:
-        state: The current graph state.
+        state: The current graph state, expected to contain 'messages' and 'chat_history'.
 
     Returns:
-        A dictionary with the simulated retrieval result ('result').
+        A dictionary with the final result from the RAG/SQL app ('result').
     """
-    print("--- Retrieve Node (Simulation) ---")
-    # Get content from the last message (should be BaseMessage)
-    last_message = state["messages"][-1] if state["messages"] else None
-    user_question = last_message.content if isinstance(last_message, HumanMessage) else "Unknown query"
+    print("--- Retrieve Node ---")
+    if not RAG_APP_AVAILABLE:
+        print("Warning: RAG/SQL app not available. Returning simulated retrieval.")
+        return {"result": "Simulated retrieval: Could not find specific information."}
 
-    # In a real app, you'd query a vector DB or other source here.
-    simulated_data = f"Simulated data related to '{user_question[:30]}...': Found relevant policy document XYZ."
-    print(f"Retrieval Result: {simulated_data}")
-    # Here you might feed the retrieved data + question back to an LLM for synthesis
-    # For simplicity, we just return the simulated data directly.
-    return {"result": simulated_data}
+    # Ensure messages list is not empty and the last message is HumanMessage
+    if not state.get("messages") or not isinstance(state["messages"][-1], HumanMessage):
+        print("Warning: Last message in retrieve_node is not a valid HumanMessage.")
+        return {"result": "Error: Invalid message state for retrieval."}
+
+    last_message = state["messages"][-1]
+    user_query = last_message.content
+    print(f"Retrieve Node processing query: '{user_query}'")
+
+    # Prepare input for the RAG/SQL graph
+    # The RAG/SQL graph expects 'question' and 'chat_history'
+    rag_input = {"question": user_query}
+
+    # --- Pass chat_history if available in the state ---
+    current_chat_history = state.get("chat_history")
+    if current_chat_history:
+        # Ensure chat_history is in the expected format (list of BaseMessage)
+        # Convert if necessary, though it should be correct from slack_app
+        rag_input["chat_history"] = current_chat_history
+        print(f"Retrieve Node: Passing {len(current_chat_history)} messages from chat_history to RAG/SQL app.")
+    else:
+        print("Retrieve Node: No chat_history found in state.")
+        rag_input["chat_history"] = [] # Pass empty list if none
+
+    try:
+        print(f"Invoking RAG/SQL app with input keys: {list(rag_input.keys())}")
+        # The RAG/SQL app ('rag_sql_app') should return a state dictionary
+        # We expect the final answer to be in a key like 'generation' or 'answer'
+        # Let's assume the RAG app's final state has a 'generation' key
+        rag_result_state = rag_sql_app.invoke(rag_input, {"recursion_limit": 10}) # Increase recursion limit slightly
+
+        print(f"RAG/SQL app returned state: {rag_result_state}") # Log the full returned state for debugging
+
+        # Check for failure condition based on retry counts in the sub-graph
+        final_generation = None
+        if isinstance(rag_result_state, dict):
+            # Check retries first (assuming 'retries' key exists in rag_sql_app state)
+            if rag_result_state.get('retries', 0) >= MAX_RETRIES:
+                print(f"Warning: RAG/SQL app hit max retries ({MAX_RETRIES}).")
+                # Provide a user-friendly message indicating failure after retries
+                final_generation = "I tried searching, but encountered some issues retrieving the specific information. Could you try rephrasing your question?"
+            else:
+                # Try to extract the final generation, might be nested
+                # Prioritize 'result', then 'generation', then 'answer'
+                if 'result' in rag_result_state and rag_result_state['result']:
+                    final_generation = rag_result_state['result']
+                elif 'generation' in rag_result_state and rag_result_state['generation']:
+                    final_generation = rag_result_state['generation']
+                elif 'answer' in rag_result_state and rag_result_state['answer']: # Alternative key
+                    final_generation = rag_result_state['answer']
+
+                # If still None, check the messages list in the sub-graph state
+                elif 'messages' in rag_result_state and isinstance(rag_result_state['messages'], list) and rag_result_state['messages']:
+                    last_rag_message = rag_result_state['messages'][-1]
+                    # Ensure it's an AIMessage and not the input HumanMessage
+                    if isinstance(last_rag_message, AIMessage):
+                        final_generation = last_rag_message.content
+                    elif len(rag_result_state['messages']) > 1 and isinstance(rag_result_state['messages'][-2], AIMessage):
+                         # Sometimes the state might include the human input as the last message
+                         final_generation = rag_result_state['messages'][-2].content
+
+
+            if final_generation is None:
+                 print("Warning: Could not extract final generation from RAG/SQL app state keys (result, generation, answer, messages).")
+                 final_generation = "I wasn't able to find a specific answer for that."
+
+
+        else:
+            # If rag_result_state is not a dict (e.g., just a string), use it directly
+            print(f"Warning: RAG/SQL app returned a non-dictionary state: {type(rag_result_state)}. Using it directly.")
+            final_generation = str(rag_result_state) if rag_result_state else "Received an unexpected empty response."
+
+
+    except Exception as e:
+        print(f"Error invoking RAG/SQL app: {e}", exc_info=True) # Add exc_info for traceback
+        # Provide a generic error message if the RAG app fails unexpectedly
+        final_generation = "Sorry, I encountered an error while trying to retrieve the information."
+
+    print(f"Retrieve Node Result: {final_generation}")
+    # Update the main graph's state with the final result
+    return {"result": final_generation} # Store result in the main graph's state
 
 # --- Human Node (Simulation - no change needed) ---
 def human_node(state: GraphState):

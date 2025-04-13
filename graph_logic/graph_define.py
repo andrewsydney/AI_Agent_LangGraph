@@ -74,8 +74,10 @@ class GraphState(TypedDict):
         generation: LLM generation.
         documents: List of documents from retriever (before merge).
         db_results: List of results (strings) from database query.
+        chat_history: Optional list of BaseMessages representing the conversation history.
         retry_count: number of retries.
         routing_decision: Optional[str]
+        grading_decision: Optional[str]
     """
 
     # Use take_last for potential implicit conflicts, including for keys
@@ -88,6 +90,7 @@ class GraphState(TypedDict):
     # Fields updated by parallel branches, to be merged by combine_results
     documents: Annotated[List[Document], take_last] # Apply take_last
     db_results: Annotated[List[str], take_last]     # Apply take_last
+    chat_history: Annotated[Optional[List[BaseMessage]], take_last] # Add chat_history field
     # Add a field to store the routing decision temporarily
     routing_decision: Optional[str]
     # Add field for grading decision
@@ -260,12 +263,13 @@ def combine_results(state):
 def agent(state):
     """
     Determines whether to retrieve documents, query database, or both,
-    based on the initial routing decision. It also performs question rewriting.
+    based on the initial routing decision. It also performs question rewriting using chat history.
     Updates the 'question' field with the rewritten question (if any).
     Returns the full state.
     """
-    print("---AGENT: REWRITING QUESTION---")
+    print("---AGENT: REWRITING QUESTION (with history)---") # Updated log
     original_question = state.get("original_question") or state["question"] # Use original if available
+    chat_history = state.get("chat_history", []) # <<< GET CHAT HISTORY
     retry_count = state.get("retry_count", 0)
 
     if retry_count >= MAX_RETRIES:
@@ -275,19 +279,23 @@ def agent(state):
 
     # Perform question rewriting before deciding on retrieval/DB query
     try:
-        print("---REWRITING QUESTION---")
-        # Correctly CALL the rewrite function, don't use .invoke on the function itself
-        rewritten_query_obj = rewrite_question_manual(original_question) # Pass the question string
+        print("---REWRITING QUESTION (Agent Node)---") # Clarify log source
+        # Create the dictionary expected by the updated rewrite_question_manual
+        rewrite_input = {
+            "question": original_question,
+            "chat_history": chat_history # <<< PASS CHAT HISTORY
+        }
+        # Correctly CALL the rewrite function
+        rewritten_question_str = rewrite_question_manual(rewrite_input) # Pass the dictionary
 
-        # Check if rewriting produced a valid object with the expected attribute
-        if hasattr(rewritten_query_obj, 'rewritten_question') and rewritten_query_obj.rewritten_question:
-            rewritten_question_str = rewritten_query_obj.rewritten_question
+        # Check if rewriting produced a non-empty string
+        if isinstance(rewritten_question_str, str) and rewritten_question_str:
             print(f"---REWRITTEN QUESTION: {rewritten_question_str}---")
             # Update the question field for subsequent nodes
             state["question"] = rewritten_question_str
         else:
-            # Handle cases where rewriting failed or didn't return the expected structure
-            print(f"--- WARNING during question rewriting (agent node): Rewriting did not return expected format or failed. Using original question. ---")
+            # Handle cases where rewriting failed or returned empty string
+            print(f"--- WARNING during question rewriting (agent node): Rewriting returned empty or invalid. Using original question. ---")
             # Ensure state["question"] remains the original or previous question
             state["question"] = original_question # Fallback to original
     except Exception as e:
@@ -372,36 +380,48 @@ def grade_documents(state):
 
 def transform_query(state):
     """
-    Transform the ORIGINAL query to produce a better question and increments retry count.
-    Updates the 'question' and 'retry_count' fields in the state.
+    Transform the query to produce a better question.
+    Retrieves chat_history from the state.
     """
-    print("---TRANSFORM QUERY (Using Original Question)---")
-    current_question = state["question"]
-    original_question = state.get("original_question")
-    retry_count = state.get("retry_count", 0) + 1
-    print(f"---INCREMENTING RETRY COUNT TO: {retry_count}---")
+    print("---TRANSFORM QUERY---")
+    question = state["question"]
+    original_question = state.get("original_question", question) # Use original if available
+    retry_count = state.get("retry_count", 0) + 1 # Increment retry count
+    chat_history = state.get("chat_history", []) # Get chat history from state
 
-    if not original_question:
-        print("---WARNING: Original question not found in state, using current question for rewrite.---")
-        question_to_rewrite = current_question
-    else:
-        question_to_rewrite = original_question
+    print(f"--- Transforming query (Retry {retry_count}): {original_question} ---")
+    print(f"--- Using history length: {len(chat_history)} ---")
 
-    print(f"---REWRITING BASED ON ORIGINAL: {question_to_rewrite}---")
-    # Correctly invoke the imported RunnableSequence
+    # Check if max retries reached
+    if retry_count > MAX_RETRIES:
+        print(f"--- Max retries ({MAX_RETRIES}) reached. Ending run. ---")
+        # Decide how to end - maybe return a specific state or marker
+        # For now, returning state which might lead to END via conditional edge
+        return {**state, "grading_decision": "end_no_docs"} # Signal to end
+
+    # Assuming rewrite_question_manual is imported and handles the actual rewrite
+    # We need to ensure it accepts chat_history
+    # The output of rewrite_question_manual might be just the string or a structured object
     try:
-        rewritten_question_result = rewrite_question_manual.invoke({"question": question_to_rewrite})
-        # Assuming the result object has a 'rewritten_question' attribute
-        better_question = rewritten_question_result.rewritten_question
+        # Pass chat_history to the rewrite function
+        rewritten_question_result = rewrite_question_manual.invoke({
+            "question": original_question,
+            "chat_history": chat_history
+        })
+        print(f"--- Rewritten Question Result: {rewritten_question_result} ---")
+        # The actual rewritten string might be inside the result object
+        # Adjust based on what rewrite_question_manual actually returns
+        # Assuming it returns a string directly for now:
+        new_question = rewritten_question_result if isinstance(rewritten_question_result, str) else original_question
+
     except Exception as e:
-        print(f"--- ERROR during question rewriting (transform_query node): {e} ---")
-        # Fallback: Use the question we attempted to rewrite or original? Let's use question_to_rewrite.
-        better_question = question_to_rewrite 
+        print(f"--- ERROR during query transformation: {e}. Using original question. ---")
+        new_question = original_question # Fallback to original on error
 
-    print(f"---NEW QUESTION FOR NEXT CYCLE: {better_question}---")
-
-    # Update question and retry_count fields and pass other state through
-    return {**state, "question": better_question, "retry_count": retry_count}
+    # Update state with the new question and incremented retry count
+    # Return only the updated fields
+    # return {**state, "question": new_question, "retry_count": retry_count}
+    return {"question": new_question, "retry_count": retry_count}
 
 
 def human(state):
@@ -443,23 +463,25 @@ def human(state):
 # New node for state initialization
 def initialize_state(state: GraphState):
     """
-    Initializes retry_count and ensures original_question is set.
-    Returns the updated state fields.
+    Initializes the state for the RAG/SQL graph run.
+    Sets retry_count to 0 and copies original_question.
+    Also copies chat_history from the input state.
     """
-    print("--- INITIALIZING STATE ---")
-    original_question = state.get("original_question")
-    current_question = state.get("question")
-
-    if not original_question:
-        print("--- WARNING: original_question not set in initial state! Using current question. ---")
-        original_question = current_question # Set original_question if missing
-
-    print("--- INITIALIZING RETRY COUNT TO 0 ---")
-    # Return the state updates as a dictionary
-    return {
-        "retry_count": 0,
-        "original_question": original_question
-    }
+    print("---INITIALIZING STATE---")
+    # state is the input dictionary passed to invoke, containing {"question": ..., "chat_history": ...}
+    initial_state = GraphState(
+        question=state['question'],
+        original_question=state['question'], # Store the initial question
+        generation="",
+        documents=[],
+        db_results=[],
+        retry_count=0,
+        routing_decision=None,
+        grading_decision=None,
+        chat_history=state.get('chat_history', []) # Get chat_history from input
+    )
+    print(f"--- Initial State Created with History Length: {len(initial_state['chat_history'])} ---")
+    return initial_state
 
 def decide_to_generate(state):
     """
@@ -597,28 +619,15 @@ def rewrite_final_answer(state: GraphState):
 
 # Define the function that determines the initial route
 def determine_initial_route(state: GraphState):
-    print("--- Determining Initial Route ---")
-    # Directly use the imported route_question function
-    try:
-        # Correctly call the imported function
-        routing_result = route_question(state["question"]) 
-        # Check if routing_result is RouteQuery before accessing attribute
-        if isinstance(routing_result, RouteQuery):
-            route = routing_result.datasource
-            print(f"--- Initial Route Decision: {route} ---")
-            if route == "human":
-                return "human"
-            elif route == "agent":
-                return "agent" 
-            else:
-                print(f"--- WARNING: Unexpected datasource from router: {route}. Defaulting to agent path. ---")
-                return "agent"
-        else:
-            # Handle the case where route_question returned a default/error RouteQuery object
-            # after failing to parse the LLM output (based on logic in query_analysis.py)
-            print(f"--- WARNING: route_question returned unexpected type: {type(routing_result)}. Using default datasource: {routing_result.datasource} ---")
-            return routing_result.datasource # Return the default/fallback datasource
-
-    except Exception as e:
-         print(f"--- ERROR during initial routing in determine_initial_route: {e}. Defaulting to agent path. ---")
-         return "agent" # Default path on error
+    """
+    Determines the initial route based on the 'routing_decision' key in the state,
+    which is now always set to 'agent' by the modified initialize_state.
+    """
+    print(f"--- Determining initial route based on state decision: {state.get('routing_decision')} ---")
+    if state.get("routing_decision") == "human":
+        print("--- Routing to: human ---")
+        return "human"
+    else:
+        # Default to agent if decision is 'agent' or missing/unexpected
+        print("--- Routing to: agent ---")
+        return "agent"

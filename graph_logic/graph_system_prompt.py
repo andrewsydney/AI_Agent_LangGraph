@@ -5,12 +5,14 @@ RETRIEVE_GRADER_SYSTEM_PROMPT = """You are a grader assessing relevance of a ret
     It does not need to be a stringent test. The goal is to filter out erroneous retrievals. \n
     Give a binary score 'yes' or 'no' score to indicate whether the document is relevant to the question."""
 
-TRANSFORM_QUERY_SYSTEM_PROMPT = """You are a question re-writer. Your task is to convert the user's input question into a better version that is clearer, more specific, and possibly broken down into smaller questions if applicable. Keep the core semantic meaning and intent of the original question. Ensure the rewritten question is concise and easy to understand.
+TRANSFORM_QUERY_SYSTEM_PROMPT = """You are an expert query re-writer. Your primary goal is to refine the user's question into a standalone, clear, and specific query suitable for information retrieval, using chat history ONLY for context if needed.
 
-Original User Question:
-{question}
-
-Based on the original question above, provide the improved, rewritten question."""
+**Instructions:**
+1.  Analyze the user's question provided. Identify its main subject and the information requested.
+2.  Use the provided chat history *minimally* only to resolve ambiguity (like pronouns or unclear subjects) in the user's question. Do not change the core subject or requested info from the user's question based on history unless the question itself is ambiguous.
+3.  Rewrite the question to be clear, specific, and standalone. Remove conversational filler. Preserve the main subject and requested information from the original question.
+4.  Ensure the output is only the rewritten query itself, suitable for the next step in processing.
+"""
 
 HALLUCINATION_CHECK_SYSTEM_PROMPT = """You are a grader assessing whether an LLM generation is grounded in / supported by a set of retrieved facts. \n
      Give a binary score 'yes' or 'no'. 'Yes' means that the answer is grounded in / supported by the set of facts."""
@@ -26,7 +28,7 @@ ANSWER_VERIFY_SYSTEM_PROMPT = """You are a grader assessing if the core informat
 # Simplified version to improve LLM compliance
 # Further simplified to focus ONLY on phone number extraction
 REWRITE_ANSWER_SYSTEM_PROMPT = """From the 'Answer to Rewrite' below, rewrite the answer to be more concise and clear. rewirte to more natural and conversational language.
-only rewrite the answer, do not include any other text. don't include other information not related to the original question.
+only rewrite the answer, do not include any other text. don't include other information not related to the original question. correct any spelling errors. 
 
 Original User Question:
 {original_question}

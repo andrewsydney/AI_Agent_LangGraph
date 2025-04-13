@@ -6,14 +6,12 @@ import os
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 from graph_define import (
     GraphState, 
-    human, 
     agent, 
     grade_documents, 
     generate,
     retrieve, 
     transform_query, 
     initialize_state,
-    determine_initial_route,
     decide_to_generate, 
     grade_generation_v_documents_and_question,
     call_sql_subgraph,
@@ -25,7 +23,6 @@ workflow = StateGraph(GraphState)
 
 # Define the nodes
 workflow.add_node("initialize_state", initialize_state)
-workflow.add_node("human", human)  # human
 workflow.add_node("agent", agent)  # agent
 workflow.add_node("retrieve", retrieve)  # retrieve
 workflow.add_node("call_sql_subgraph", call_sql_subgraph)
@@ -39,14 +36,7 @@ workflow.add_node("rewrite_final_answer", rewrite_final_answer)
 # Build graph
 workflow.set_entry_point("initialize_state")
 
-workflow.add_conditional_edges(
-    "initialize_state",
-    determine_initial_route,
-    {
-        "human": "human",
-        "agent": "agent",
-    },
-)
+workflow.add_edge("initialize_state", "agent")
 
 workflow.add_edge("agent", "retrieve")
 workflow.add_edge("agent", "call_sql_subgraph")
@@ -81,7 +71,6 @@ workflow.add_conditional_edges(
 
 workflow.add_edge("transform_query", "agent")
 workflow.add_edge("rewrite_final_answer", END)
-workflow.add_edge("human", END)
 
 # Compile
 app = workflow.compile()

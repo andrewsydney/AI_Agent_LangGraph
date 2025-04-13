@@ -6,7 +6,7 @@ from slack_sdk.web.client import WebClient
 from slack_sdk.errors import SlackApiError
 from slack_bolt.adapter.flask import SlackRequestHandler
 from slack_bolt import App
-from dotenv import find_dotenv, load_dotenv
+from dotenv import find_dotenv, load_dotenv # Import dotenv
 from flask import Flask, request
 from langchain.memory import ConversationBufferWindowMemory
 from langchain_community.chat_message_histories import SQLChatMessageHistory
@@ -26,35 +26,52 @@ from conditional_routing_graph import router_chain, RouterDecision # Import rout
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Load environment variables from .env file
-# Make sure .env is in the parent directory (main project root)
-# or adjust find_dotenv() accordingly if it's elsewhere.
+# --- Environment Variable Loading ---
 dotenv_path = find_dotenv()
 if dotenv_path:
     logger.info(f"Loading .env file from: {dotenv_path}")
     load_dotenv(dotenv_path)
 else:
     logger.warning(".env file not found. Relying on environment variables.")
+# --- End Loading ---
+
 
 # --- Slack API Credentials ---
+# Read Bot Token from environment
 SLACK_BOT_TOKEN = os.environ.get("SLACK_BOT_TOKEN")
+# Read Signing Secret from environment
 SLACK_SIGNING_SECRET = os.environ.get("SLACK_SIGNING_SECRET")
+
 SLACK_BOT_USER_ID = None # Will be fetched automatically
+
+# --- Debugging: Print the loaded signing secret ---
+# logger.info(f"DEBUG: Loaded SLACK_SIGNING_SECRET = '{SLACK_SIGNING_SECRET}'") # Keep commented out or remove
+# --- End Debugging ---
 
 # --- Database Configuration ---
 DB_FILE = "chat_history.db"
 DB_TABLE = "message_store"
-MEMORY_WINDOW_SIZE = 20 # Keep last 10 messages (5 pairs)
+MEMORY_WINDOW_SIZE = 10 # Keep last 10 messages (5 pairs)
 
 if not SLACK_BOT_TOKEN:
     logger.error("SLACK_BOT_TOKEN environment variable not set. Exiting.")
     exit(1)
+# Check SLACK_SIGNING_SECRET existence
 if not SLACK_SIGNING_SECRET:
     logger.error("SLACK_SIGNING_SECRET environment variable not set. Exiting.")
     exit(1)
 
 
 # --- Slack Bolt App Initialization ---
+# Ensure secrets are loaded before initializing the app
+# Check both secrets now
+if not SLACK_BOT_TOKEN or not SLACK_SIGNING_SECRET:
+    logger.error("Missing SLACK_BOT_TOKEN or SLACK_SIGNING_SECRET in environment.")
+    exit(1)
+
+# !!! Remove or adjust debug logging if necessary !!!
+# logger.info(f"DEBUG: Initializing Bolt App with Signing Secret: '{SLACK_SIGNING_SECRET}'")
+
 app = App(token=SLACK_BOT_TOKEN, signing_secret=SLACK_SIGNING_SECRET)
 
 
@@ -118,9 +135,12 @@ def handle_mentions(body, say, client):
 
     logger.info(f"Using session_id: {session_id} for memory.")
 
+    # Use connection string for SQLChatMessageHistory
+    connection_string = f"sqlite:///{DB_FILE}"
+
     message_history = SQLChatMessageHistory(
         session_id=session_id,
-        connection_string=f"sqlite:///{DB_FILE}",
+        connection_string=connection_string,
         table_name=DB_TABLE
     )
 
@@ -165,10 +185,13 @@ def handle_mentions(body, say, client):
     # --- Placeholder for LangGraph Integration ---
     # Pass history to the graph if needed
     try:
-        logger.info(f"Invoking main_graph with user query: '{text}'")
+        logger.info(f"Invoking main_graph with user query: '{text}' and history length: {len(chat_history_messages)}")
 
-        # Prepare input for the graph - only the current message
-        graph_input = {"messages": [HumanMessage(content=text)]}
+        # Prepare input for the graph - current message and chat history
+        graph_input = {
+            "messages": [HumanMessage(content=text)],
+            "chat_history": chat_history_messages # Pass the loaded history
+        }
 
         # Invoke the graph
         final_result_state = main_graph.invoke(graph_input)
@@ -210,9 +233,12 @@ def handle_direct_messages(message, say, client):
         session_id = f"slack_dm_{channel_id}" # DM channel ID is stable for the pair
         logger.info(f"Using session_id: {session_id} for memory.")
 
+        # Use connection string for SQLChatMessageHistory
+        connection_string = f"sqlite:///{DB_FILE}"
+
         message_history = SQLChatMessageHistory(
             session_id=session_id,
-            connection_string=f"sqlite:///{DB_FILE}",
+            connection_string=connection_string,
             table_name=DB_TABLE
         )
 
@@ -255,10 +281,13 @@ def handle_direct_messages(message, say, client):
 
         # --- Placeholder for LangGraph Integration (or other logic) ---
         try:
-            logger.info(f"Invoking main_graph with user query: '{text}'")
+            logger.info(f"Invoking main_graph with user query: '{text}' and history length: {len(chat_history_messages)}")
 
-            # Prepare input for the graph - only the current message
-            graph_input = {"messages": [HumanMessage(content=text)]}
+            # Prepare input for the graph - current message and chat history
+            graph_input = {
+                "messages": [HumanMessage(content=text)],
+                "chat_history": chat_history_messages # Pass the loaded history
+            }
 
             # Invoke the graph
             final_result_state = main_graph.invoke(graph_input)
@@ -288,7 +317,13 @@ def handle_direct_messages(message, say, client):
 @flask_app.route("/slack/events", methods=["POST"])
 def slack_events():
     """Handles incoming Slack events."""
-    return handler.handle(request)
+    # !!! Log headers before handling !!!
+    logger.info("--- Received Request Headers ---")
+    for header, value in request.headers.items():
+        logger.info(f"{header}: {value}")
+    logger.info("--- End Request Headers ---")
+    # !!! End logging headers !!!
+    return handler.handle(request) # Pass to Bolt handler
 
 # --- Flask Route for Health Check ---
 @flask_app.route("/", methods=["GET"])
@@ -302,6 +337,7 @@ if __name__ == "__main__":
     logger.info("Fetching Bot User ID...")
     fetch_bot_user_id()
     logger.info("Starting Flask app for Slack Bolt...")
-    # Use host='0.0.0.0' to be accessible externally if needed (e.g., Docker)
+    # Remove comment about ProxyFix handling headers
+    # Use host='0.0.0.0' to listen on all available network interfaces
     # Use debug=True only for development
     flask_app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 3000)), debug=False) 

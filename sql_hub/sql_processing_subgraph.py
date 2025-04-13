@@ -99,6 +99,7 @@ def generate_next_query(state: SqlAgentSubgraphState):
     2.  If the question asks for *both* a count and a list, prioritize getting the *complete list* first (e.g., `SELECT item FROM ...`).
     3.  If *all* necessary information seems present in the 'Accumulated Results', respond with "NONE".
     4.  Otherwise, respond ONLY with the *single* best SQLite SQL query to fetch the primary missing information. Do not include explanations or comments.
+    5.  If the user provides a partial name (e.g., 'wangfujing store'), use the `LIKE` operator with '%' wildcards for fuzzy matching (e.g., `WHERE name LIKE '%wangfujing%'`).
 
     Here are some examples:
 
@@ -136,28 +137,62 @@ def generate_next_query(state: SqlAgentSubgraphState):
     Your Response: SELECT name FROM providers
     --- End Example 2 ---
     
-    --- Example 3: Count and List (Step 2: Info Gathered, Done) ---
-    User Question: How many providers are there, and what are their names?
+    --- Example 3: Simple Store Name Lookup ---
+    User Question: What is the name for store R001?
     Available Tables: retail_store, phone_number, providers
     Database Schema: 
-    CREATE TABLE retail_store (store_number TEXT PRIMARY KEY, address TEXT)
+    CREATE TABLE retail_store (store_number TEXT PRIMARY KEY, name TEXT, address TEXT)
     CREATE TABLE phone_number (id INTEGER PRIMARY KEY, store_number TEXT, phone_number TEXT, provider_id INTEGER)
     CREATE TABLE providers (provider_id INTEGER PRIMARY KEY, name TEXT)
     --- History ---
-    Previous Query: SELECT name FROM providers
-    Previous Result: [('AT&T',), ('Verizon',), ('T-Mobile',)]
+    Previous Query: N/A
+    Previous Result: N/A
     --- End History ---
     Accumulated Results So Far (for context):
-    [('AT&T',), ('Verizon',), ('T-Mobile',)]
+    
     --- End Accumulated ---
-    Your Response: NONE
+    Your Response: SELECT name FROM retail_store WHERE store_number = 'R001'
     --- End Example 3 ---
     
-    --- Example 4: Multi-step Join (Step 1: Find store number) ---
+    --- Example 4: Fuzzy Name Search ---
+    User Question: What is the store number for the wangfujing store?
+    Available Tables: retail_store, phone_number, providers
+    Database Schema: 
+    CREATE TABLE retail_store (store_number TEXT PRIMARY KEY, name TEXT, address TEXT)
+    CREATE TABLE phone_number (id INTEGER PRIMARY KEY, store_number TEXT, phone_number TEXT, provider_id INTEGER)
+    CREATE TABLE providers (provider_id INTEGER PRIMARY KEY, name TEXT)
+    --- History ---
+    Previous Query: N/A
+    Previous Result: N/A
+    --- End History ---
+    Accumulated Results So Far (for context):
+    
+    --- End Accumulated ---
+    Your Response: SELECT store_number FROM retail_store WHERE name LIKE '%wangfujing%'
+    --- End Example 4 ---
+
+    --- Example 5: Multi-step Name to Provider (Step 2: Find provider name by store number) ---
+    User Question: What is the service provider (telco) for the 'Wangfujing Shopping Street' store?
+    Available Tables: retail_store, phone_number, providers
+    Database Schema: 
+    CREATE TABLE retail_store (store_number TEXT PRIMARY KEY, name TEXT, address TEXT)
+    CREATE TABLE phone_number (id INTEGER PRIMARY KEY, store_number TEXT, phone_number TEXT, provider_id INTEGER)
+    CREATE TABLE providers (provider_id INTEGER PRIMARY KEY, name TEXT)
+    --- History ---
+    Previous Query: SELECT store_number FROM retail_store WHERE name LIKE '%wangfujing%'
+    Previous Result: [('R001',)]
+    --- End History ---
+    Accumulated Results So Far (for context):
+    [('R001',)]
+    --- End Accumulated ---
+    Your Response: SELECT T2.name FROM phone_number AS T1 INNER JOIN providers AS T2 ON T1.provider_id = T2.provider_id WHERE T1.store_number = 'R001'
+    --- End Example 5 ---
+
+    --- Example 6: Multi-step Join (Step 1: Find store number by address) ---
     User Question: What are the phone numbers at the store located at '123 Main St'?
     Available Tables: retail_store, phone_number, providers
     Database Schema: 
-    CREATE TABLE retail_store (store_number TEXT PRIMARY KEY, address TEXT)
+    CREATE TABLE retail_store (store_number TEXT PRIMARY KEY, name TEXT, address TEXT)
     CREATE TABLE phone_number (id INTEGER PRIMARY KEY, store_number TEXT, phone_number TEXT, provider_id INTEGER)
     CREATE TABLE providers (provider_id INTEGER PRIMARY KEY, name TEXT)
     --- History ---
@@ -168,13 +203,13 @@ def generate_next_query(state: SqlAgentSubgraphState):
     
     --- End Accumulated ---
     Your Response: SELECT store_number FROM retail_store WHERE address = '123 Main St'
-    --- End Example 4 ---
+    --- End Example 6 ---
 
-    --- Example 5: Multi-step Join (Step 2: Use store number to find phone numbers) ---
+    --- Example 7: Multi-step Join (Step 2: Use store number to find phone numbers by address) ---
     User Question: What are the phone numbers at the store located at '123 Main St'?
     Available Tables: retail_store, phone_number, providers
     Database Schema: 
-    CREATE TABLE retail_store (store_number TEXT PRIMARY KEY, address TEXT)
+    CREATE TABLE retail_store (store_number TEXT PRIMARY KEY, name TEXT, address TEXT)
     CREATE TABLE phone_number (id INTEGER PRIMARY KEY, store_number TEXT, phone_number TEXT, provider_id INTEGER)
     CREATE TABLE providers (provider_id INTEGER PRIMARY KEY, name TEXT)
     --- History ---
@@ -185,7 +220,7 @@ def generate_next_query(state: SqlAgentSubgraphState):
     [('R005',)]
     --- End Accumulated ---
     Your Response: SELECT phone_number FROM phone_number WHERE store_number = 'R005'
-    --- End Example 5 ---
+    --- End Example 7 ---
 
     --- Now, the actual task ---
     User Question: {question}
